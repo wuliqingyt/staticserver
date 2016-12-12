@@ -1,27 +1,28 @@
 package main
 
 import (
+    "log"
 	"fmt"
 	"html/template"
 	"io"
 	"net/http"
 	"os"
+    "path"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"time"
 )
 
-var mux map[string]func(http.ResponseWriter, *http.Request)
-
 type Myhandler struct{}
-type home struct {
-	Title string
-}
 
 const (
-	Template_Dir = "./view/"
-	Upload_Dir   = "./upload/"
+	templateDir = "./view/"
+	uploadDir   = "./upload/"
+)
+
+var (
+    mux map[string]func(http.ResponseWriter, *http.Request)
+    workDir, _= filepath.Abs(filepath.Dir(os.Args[0]))
 )
 
 func main() {
@@ -33,69 +34,81 @@ func main() {
 	mux = make(map[string]func(http.ResponseWriter, *http.Request))
 	mux["/"] = index
 	mux["/upload"] = upload
-	mux["/file"] = StaticServer
 	server.ListenAndServe()
 }
 
+
+
 func (*Myhandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    addr := r.Header.Get("X-Real-IP")
+    if addr == "" {
+        addr = r.Header.Get("X-Forwarded-For")
+        if addr == "" {
+            addr = r.RemoteAddr
+        }
+    }
+    log.Printf("Started %s %s for %s %v", r.Method, r.URL.Path, addr, r.Host)
+
 	if h, ok := mux[r.URL.String()]; ok {
 		h(w, r)
 		return
 	}
-	if ok, _ := regexp.MatchString("/css/", r.URL.String()); ok {
+
+	if ok, _ := regexp.MatchString("^/file", r.URL.String()); ok {
+        dir := path.Dir(r.URL.String())
+        realDir, _ := filepath.Rel("/file", dir)
+		http.StripPrefix(dir, http.FileServer(http.Dir("/" + realDir))).ServeHTTP(w, r)
+    } else if ok, _ := regexp.MatchString("^/css/", r.URL.String()); ok {
 		http.StripPrefix("/css/", http.FileServer(http.Dir("./css/"))).ServeHTTP(w, r)
 	} else {
-		http.StripPrefix("/", http.FileServer(http.Dir("./upload/"))).ServeHTTP(w, r)
-	}
-
-}
-
-func upload(w http.ResponseWriter, r *http.Request) {
-
-	if r.Method == "GET" {
-		t, _ := template.ParseFiles(Template_Dir + "file.html")
-		t.Execute(w, "上传文件")
-	} else {
-		r.ParseMultipartForm(32 << 20)
-		file, handler, err := r.FormFile("uploadfile")
-		if err != nil {
-			fmt.Fprintf(w, "%v", "上传错误")
-			return
-		}
-		fileext := filepath.Ext(handler.Filename)
-		if check(fileext) == false {
-			fmt.Fprintf(w, "%v", "不允许的上传类型")
-			return
-		}
-		filename := strconv.FormatInt(time.Now().Unix(), 10) + fileext
-		f, _ := os.OpenFile(Upload_Dir+filename, os.O_CREATE|os.O_WRONLY, 0660)
-		_, err = io.Copy(f, file)
-		if err != nil {
-			fmt.Fprintf(w, "%v", "上传失败")
-			return
-		}
-		filedir, _ := filepath.Abs(Upload_Dir + filename)
-		fmt.Fprintf(w, "%v", filename+"上传完成,服务器地址:"+filedir)
+        index(w, r)
 	}
 }
 
 func index(w http.ResponseWriter, r *http.Request) {
-	title := home{Title: "首页"}
-	t, _ := template.ParseFiles(Template_Dir + "index.html")
-	t.Execute(w, title)
+    redirIndex(w, r, nil)
 }
 
-func StaticServer(w http.ResponseWriter, r *http.Request) {
-	http.StripPrefix("/file", http.FileServer(http.Dir("./upload/"))).ServeHTTP(w, r)
+func redirIndex(w http.ResponseWriter, r *http.Request, m map[string]interface{}) {
+    data := map[string]interface{}{"Title":"首页", "WorkDir":workDir, "UploadSuccess":false, "SuccessInfo":""}
+    for k, v := range m {
+        data[k] = v
+    }
+
+	t, _ := template.ParseFiles(templateDir + "index.html")
+    t.Execute(w, data)
 }
 
-func check(name string) bool {
-	ext := []string{".exe", ".js", ".png"}
 
-	for _, v := range ext {
-		if v == name {
-			return false
+func upload(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" {
+		t, _ := template.ParseFiles(templateDir + "file.html")
+        t.Execute(w, map[string]interface{}{"Title":"上传文件", "Host":r.Host})
+	} else {
+		r.ParseMultipartForm(32 << 20)
+		file, handler, err := r.FormFile("uploadfile")
+		if err != nil {
+            fmt.Fprintf(w, "%v:%v", "上传错误", err)
+			return
 		}
+
+        os.Mkdir(uploadDir, os.ModeDir)
+
+		filename := handler.Filename
+        log.Printf("upload %s", filename)
+		f, _ := os.Create(uploadDir + handler.Filename)
+		if err != nil {
+            fmt.Fprintf(w, "%v:%v", "上传失败", err)
+			return
+		}
+		_, err = io.Copy(f, file)
+		if err != nil {
+            fmt.Fprintf(w, "%v:%v", "写入失败", err)
+			return
+		}
+		filedir, _ := filepath.Abs(uploadDir + filename)
+
+        redirIndex(w, r, map[string]interface{}{"UploadSuccess":true, "SuccessInfo":filename + "上传完成,服务器地址:"+filedir})
 	}
-	return true
 }
+
