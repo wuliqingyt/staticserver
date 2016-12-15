@@ -6,11 +6,12 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+    "net/http/cgi"
 	"os"
     "path"
 	"path/filepath"
 	"regexp"
-	"time"
+//	"time"
 )
 
 type Myhandler struct{}
@@ -26,10 +27,12 @@ var (
 )
 
 func main() {
+    fmt.Printf("config:%v\n", GetConfig())
+
 	server := http.Server{
-		Addr:        ":9090",
+		Addr:        GetConfig().Addr,
 		Handler:     &Myhandler{},
-		ReadTimeout: 10 * time.Second,
+		//ReadTimeout: 10 * time.Second,
 	}
 	mux = make(map[string]func(http.ResponseWriter, *http.Request))
 	mux["/"] = index
@@ -37,7 +40,15 @@ func main() {
 	server.ListenAndServe()
 }
 
+func tokenAuth(w http.ResponseWriter, r *http.Request) bool {
+    r.ParseForm()
+    if (len(r.Form["token"]) == 0) || (r.Form["token"][0] != GetConfig().Token) {
+        fmt.Fprintf(w, "invalid request\n")
+        return false
+    }
 
+    return true
+}
 
 func (*Myhandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     addr := r.Header.Get("X-Real-IP")
@@ -47,7 +58,11 @@ func (*Myhandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
             addr = r.RemoteAddr
         }
     }
+
     log.Printf("Started %s %s for %s %v", r.Method, r.URL.Path, addr, r.Host)
+    if GetConfig().AuthAll && !tokenAuth(w, r) {
+        return
+    }
 
 	if h, ok := mux[r.URL.String()]; ok {
 		h(w, r)
@@ -58,6 +73,11 @@ func (*Myhandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
         dir := path.Dir(r.URL.String())
         realDir, _ := filepath.Rel("/file", dir)
 		http.StripPrefix(dir, http.FileServer(http.Dir("/" + realDir))).ServeHTTP(w, r)
+    } else if ok, _ := regexp.MatchString("^/cgi/", r.URL.String()); ok {
+        handler := new(cgi.Handler)
+        handler.Path = filepath.Join(workDir, r.URL.Path)
+        handler.Dir = path.Dir(handler.Path)
+        handler.ServeHTTP(w, r)
     } else if ok, _ := regexp.MatchString("^/css/", r.URL.String()); ok {
 		http.StripPrefix("/css/", http.FileServer(http.Dir("./css/"))).ServeHTTP(w, r)
 	} else {
@@ -66,6 +86,9 @@ func (*Myhandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func index(w http.ResponseWriter, r *http.Request) {
+    if GetConfig().AuthIndex && !tokenAuth(w, r) {
+        return
+    }
     redirIndex(w, r, nil)
 }
 
@@ -85,7 +108,7 @@ func upload(w http.ResponseWriter, r *http.Request) {
 		t, _ := template.ParseFiles(templateDir + "file.html")
         t.Execute(w, map[string]interface{}{"Title":"上传文件", "Host":r.Host})
 	} else {
-		r.ParseMultipartForm(32 << 20)
+		r.ParseMultipartForm(256 << 20)
 		file, handler, err := r.FormFile("uploadfile")
 		if err != nil {
             fmt.Fprintf(w, "%v:%v", "上传错误", err)

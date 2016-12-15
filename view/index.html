@@ -14,7 +14,7 @@
             <a href="/file{{.WorkDir}}">{{.WorkDir}}</a></p>
             <a href="/file/">/</a></p>
             {{range $index, $element := .LinkLists}}
-            <a href="{{$element}}">{{$element}}</a></p>
+            <a href="{{$element}}{{.Token}}">{{$element}}</a></p>
             {{end}}
         </div>
     </body>
